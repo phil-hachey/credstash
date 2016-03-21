@@ -219,9 +219,7 @@ def putSecret(name, secret, version, kms_key="alias/credstash",
 
     return secrets.put_item(Item=data, ConditionExpression=Attr('name').not_exists())
 
-
-def getAllSecrets(version="", region=None,
-                  table="credential-store", context=None, profile_name=None):
+def getAllSecrets(version, region, table, key, context, profile):
     '''
     fetch and decrypt all secrets
     '''
@@ -229,7 +227,7 @@ def getAllSecrets(version="", region=None,
     secrets = listSecrets(region, table, profile_name=profile_name)
     for credential in set([x["name"] for x in secrets]):
         try:
-            output[credential] = getSecret(credential,
+            output[credential] = get_secret(credential,
                                            version,
                                            region,
                                            table,
@@ -240,8 +238,7 @@ def getAllSecrets(version="", region=None,
     return output
 
 
-def getSecret(name, version="", region=None,
-              table="credential-store", context=None, profile_name=None):
+def get_secret(name, version, region, table, key, context, profile):
     '''
     fetch and decrypt the secret called `name`
     '''
@@ -255,9 +252,10 @@ def getSecret(name, version="", region=None,
     if version == "":
         # do a consistent fetch of the credential with the highest version
         response = secrets.query(Limit=1,
-                                 ScanIndexForward=False,
-                                 ConsistentRead=True,
-                                 KeyConditionExpression=boto3.dynamodb.conditions.Key("name").eq(name))
+            ScanIndexForward=False,
+            ConsistentRead=True,
+            KeyConditionExpression=boto3.dynamodb.conditions.Key("name").eq(name))
+            
         if response["Count"] == 0:
             raise ItemNotFound("Item {'name': '%s'} couldn't be found." % name)
         material = response["Items"][0]
@@ -286,16 +284,21 @@ def getSecret(name, version="", region=None,
         raise KmsError(msg)
     except Exception as e:
         raise KmsError("Decryption error %s" % e)
+        
     key = kms_response['Plaintext'][:32]
     hmac_key = kms_response['Plaintext'][32:]
-    hmac = HMAC(hmac_key, msg=b64decode(material['contents']),
-                digestmod=SHA256)
+    hmac = HMAC(hmac_key,
+        msg=b64decode(material['contents']),
+        digestmod=SHA256)
+        
     if hmac.hexdigest() != material['hmac']:
         raise IntegrityError("Computed HMAC on %s does not match stored HMAC"
-                             % name)
+            % name)
+            
     dec_ctr = Counter.new(128)
     decryptor = AES.new(key, AES.MODE_CTR, counter=dec_ctr)
     plaintext = decryptor.decrypt(b64decode(material['contents'])).decode("utf-8")
+    
     return plaintext
 
 
@@ -367,73 +370,73 @@ def main():
         description="A credential/secret storage system")
 
     parsers['super'].add_argument("-r", "--region",
-                                  help="the AWS region in which to operate."
-                                  "If a region is not specified, credstash "
-                                  "will use the value of the "
-                                  "AWS_DEFAULT_REGION env variable, "
-                                  "or if that is not set, the value in "
-                                  "`~/.aws/config`. As a last resort, "
-                                  "it will use " + DEFAULT_REGION)
+        help="the AWS region in which to operate. If a region is not specified, "
+            "credstash will use the value of the AWS_DEFAULT_REGION env variable, "
+            "or if that is not set, the value in `~/.aws/config`. As a last resort, "
+            "it will use " + DEFAULT_REGION,
+        default=None)
     parsers['super'].add_argument("-t", "--table", default="credential-store",
-                                  help="DynamoDB table to use for "
-                                  "credential storage")
+        help="DynamoDB table to use for credential storage")
     parsers['super'].add_argument("-p", "--profile", default=None,
-                                  help="Boto config profile to use when "
-                                  "connecting to AWS")
-    subparsers = parsers['super'].add_subparsers(help='Try commands like '
-                                                 '"{name} get -h" or "{name}'
-                                                 'put --help" to get each'
-                                                 'sub command\'s options'
-                                                 .format(name=os.path.basename(
-                                                         __file__)))
+        help="Boto config profile to use when connecting to AWS")
+    subparsers = parsers['super'].add_subparsers(
+        help="Try commands like {name} get -h or {name} put --help to get each "
+            "sub command\'s options".format(name=os.path.basename( __file__)))
 
     action = 'delete'
     parsers[action] = subparsers.add_parser(action,
-                                            help='Delete a credential " \
-                                            "from the store')
-    parsers[action].add_argument("credential", type=str,
-                                 help="the name of the credential to delete")
+        help='Delete a credential from the store')
+    parsers[action].add_argument("credential",
+        type=str,
+        help="the name of the credential to delete")
     parsers[action].set_defaults(action=action)
 
     action = 'get'
-    parsers[action] = subparsers.add_parser(action, help="Get a credential "
-                                            "from the store")
-    parsers[action].add_argument("credential", type=str,
-                                 help="the name of the credential to get."
-                                 "Using the wildcard character '%s' will "
-                                 "search for credentials that match the "
-                                 "pattern" % WILDCARD_CHAR)
-    parsers[action].add_argument("context", type=key_value_pair,
-                                 action=KeyValueToDictionary, nargs='*',
-                                 help="encryption context key/value pairs "
-                                 "associated with the credential in the form "
-                                 "of \"key=value\"")
-    parsers[action].add_argument("-n", "--noline", action="store_true",
-                                 help="Don't append newline to returned "
-                                 "value (useful in scripts or with "
-                                 "binary files)")
-    parsers[action].add_argument("-v", "--version", default="",
-                                 help="Get a specific version of the "
-                                 "credential (defaults to the latest version)")
+    parsers[action] = subparsers.add_parser(action,
+        help="Get a credential from the store")
+    parsers[action].add_argument("credential",
+        type=str,
+        help="the name of the credential to get. Using the wildcard character "
+            "'%s' will search for credentials that match the pattern" % WILDCARD_CHAR)
+    parsers[action].add_argument("context",
+        type=key_value_pair,
+        action=KeyValueToDictionary,
+        nargs='*',
+        help="encryption context key/value pairs associated with the credential "
+            "in the form of \"key=value\"")
+    parsers[action].add_argument("-k", "--key",
+        default="alias/credstash",
+        help="the KMS key-id of the master key to use. See the README for more "
+            "information. Defaults to alias/credstash")
+    parsers[action].add_argument("-n", "--noline",
+        action="store_true",
+        help="Don't append newline to returned value (useful in scripts or with "
+            "binary files)")
+    parsers[action].add_argument("-v", "--version",
+        default="",
+        help="Get a specific version of the credential "
+            "(defaults to the latest version)")
     parsers[action].set_defaults(action=action)
 
     action = 'getall'
     parsers[action] = subparsers.add_parser(action,
-                                            help="Get all credentials from "
-                                            "the store")
+        help="Get all credentials from the store")
     parsers[action].add_argument("context", type=key_value_pair,
-                                 action=KeyValueToDictionary, nargs='*',
-                                 help="encryption context key/value pairs "
-                                 "associated with the credential in the form "
-                                 "of \"key=value\"")
-    parsers[action].add_argument("-v", "--version", default="",
-                                 help="Get a specific version of the "
-                                 "credential (defaults to the latest version)")
-    parsers[action].add_argument("-f", "--format", default="json",
-                                 choices=["json", "csv"] +
-                                 ([] if NO_YAML else ["yaml"]),
-                                 help="Output format. json(default) " +
-                                 ("" if NO_YAML else "yaml ") + "or csv.")
+        action=KeyValueToDictionary,
+        nargs='*',
+        help="encryption context key/value pairs associated with the credential "
+            "in the form of \"key=value\"")
+    parsers[action].add_argument("-k", "--key",
+        default="alias/credstash",
+        help="the KMS key-id of the master key to use. See the README for more "
+            "information. Defaults to alias/credstash")
+    parsers[action].add_argument("-v", "--version",
+        default="",
+        help="Get a specific version of the credential (defaults to the latest version)")
+    parsers[action].add_argument("-f", "--format",
+        default="json",
+        choices=["json", "csv"] + ([] if NO_YAML else ["yaml"]),
+        help="Output format. json(default) " + ("" if NO_YAML else "yaml ") + "or csv.")
     parsers[action].set_defaults(action=action)
 
     action = 'list'
@@ -547,7 +550,7 @@ def main():
                                                             table=args.table,
                                                             profile_name=args.profile)])
                     print(json.dumps(dict((name,
-                                          getSecret(name,
+                                          get_secret(name,
                                                     args.version,
                                                     region=region,
                                                     table=args.table,
@@ -555,7 +558,7 @@ def main():
                                                     profile_name=args.profile))
                                           for name in names)))
                 else:
-                    sys.stdout.write(getSecret(args.credential, args.version,
+                    sys.stdout.write(get_secret(args.credential, args.version,
                                                region=region, table=args.table,
                                                context=args.context,
                                                profile_name=args.profile))
